@@ -108,8 +108,11 @@ def get_channel_state(channel_id: int | str) -> dict:
             "messages": [],  # רשימת {"role": "user"|"model", "text": "..."}
             "wa_connected": False,
             "last_wa_chat": "",
+            "connected_apps": {},  # {"whatsapp": {"handle": "...", "last_tab": "..."}, "gmail": {...}, "tiktok": {...}}
         }
         save_json(CONTEXT_FILE, persistent_contexts)
+    else:
+        persistent_contexts[cid].setdefault("connected_apps", {})
     return persistent_contexts[cid]
 
 
@@ -499,26 +502,129 @@ async def compact_channel_context(channel: discord.TextChannel) -> str:
     return new_summary
 
 
+class AppConnectModal(discord.ui.Modal):
+    """חלון קופץ לחיבור אפליקציה לחדר הנוכחי ושמירת הטאב/החשבון האחרון שלה."""
+    def __init__(self, app_name: str, app_emoji: str):
+        super().__init__(title=f"{app_emoji} חיבור {app_name} לחדר זה")
+        self.app_name = app_name
+        self.app_emoji = app_emoji
+
+        self.account_input = discord.ui.TextInput(
+            label=f"שם חשבון / כתובת / קישור ב-{app_name}",
+            placeholder="למשל: כתובת מייל, שם משתמש בטיקטוק, מספר/שם בוואטסאפ או Webhook...",
+            required=True,
+            max_length=150
+        )
+        self.last_tab_input = discord.ui.TextInput(
+            label="טאב / צ'אט / תיבה אחרונה לזכירה אוטומטית",
+            placeholder="למשל: דואר נכנס חשוב, צ'אט עבודה, טיוטות סרטונים וכו'...",
+            required=False,
+            max_length=150
+        )
+        self.add_item(self.account_input)
+        self.add_item(self.last_tab_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        st = get_channel_state(interaction.channel.id)
+        apps = st.setdefault("connected_apps", {})
+        acc = self.account_input.value.strip()
+        tab = self.last_tab_input.value.strip() or "טאב ראשי"
+
+        # אם זה בעל השרת שמחבר אפליקציה ויש טאב פתוח ב-Chrome, נשמור גם את הטאב החי
+        if is_admin_or_owner(interaction.user) and self.app_name.lower() == "whatsapp":
+            live_tab = wa_get_current_tab_chat()
+            if live_tab and tab == "טאב ראשי":
+                tab = live_tab
+            st["wa_connected"] = True
+            st["last_wa_chat"] = tab
+
+        apps[self.app_name] = {
+            "emoji": self.app_emoji,
+            "account": acc,
+            "last_tab": tab,
+            "connected_at": datetime.now().strftime("%Y-%m-%d %H:%M")
+        }
+        save_channel_state()
+
+        embed = discord.Embed(
+            title=f"{self.app_emoji} האפליקציה {self.app_name} חוברה בהצלחה לחדר זה!",
+            description=(
+                f"🔗 **חשבון מחובר:** `{acc}`\n"
+                f"📌 **טאב / מיקום אחרון שמור:** `{tab}`\n\n"
+                f"✅ **החיבור נשמר קבוע לצ'אט הזה ולא יתאפס!**\n"
+                f"מעכשיו תוכל לבקש מהסוכן בחדר זה לסכם, לכתוב, לנתח ולהמשיך בדיוק מהטאב השמור שלך ב-**{self.app_name}**!"
+            ),
+            color=0x2ECC71
+        )
+        await interaction.response.send_message(embed=embed)
+
+
+class AppSelectorDropdown(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="WhatsApp", emoji="📱", description="חיבור שיחות וואטסאפ, סיכום הודעות ושמירת צ'אט אחרון"),
+            discord.SelectOption(label="Gmail / Email", emoji="📧", description="חיבור תיבת מייל, סיכום מיילים וניסוח תשובות"),
+            discord.SelectOption(label="TikTok", emoji="🎵", description="חיבור פרופיל טיקטוק, תסריטים, ניתוח ומענה לתגובות"),
+            discord.SelectOption(label="YouTube", emoji="▶️", description="חיבור ערוץ יוטיוב, סיכום סרטונים וניהול תוכן"),
+            discord.SelectOption(label="Instagram", emoji="📸", description="חיבור אינסטגרם, הודעות DM, רילס ופוסטים"),
+            discord.SelectOption(label="Telegram", emoji="✈️", description="חיבור ערוצי ושיחות טלגרם לסיכום ומענה"),
+            discord.SelectOption(label="Custom App / API", emoji="🔌", description="חיבור כל אפליקציה אחרת, אתר או Webhook"),
+        ]
+        super().__init__(placeholder="🔌 בחר אפליקציה לחיבור לחדר צ'אט זה...", min_values=1, max_values=1, options=options, custom_id="select_app_conn")
+
+    async def callback(self, interaction: discord.Interaction):
+        choice = self.values[0]
+        emoji_map = {
+            "WhatsApp": "📱", "Gmail / Email": "📧", "TikTok": "🎵",
+            "YouTube": "▶️", "Instagram": "📸", "Telegram": "✈️", "Custom App / API": "🔌"
+        }
+        await interaction.response.send_modal(AppConnectModal(choice, emoji_map.get(choice, "🔌")))
+
+
 class ContextLimitView(discord.ui.View):
-    """כפתורים שמופיעים כשמגיעים למגבלת הקונטקסט או בכל עת."""
+    """כפתורי שליטה בכל חדר צ'אט: חיבור אפליקציות, בדיקת אפליקציות מחוברות, דחיסת קונטקסט ופתיחת צ'אט חדש."""
     def __init__(self):
         super().__init__(timeout=None)
+        self.add_item(AppSelectorDropdown())
 
-    @discord.ui.button(label="🗜️ דחוס צ'אט והמשך (שומר זיכרון וחיבור וואטסאפ)", style=discord.ButtonStyle.primary, custom_id="btn_compact_ctx")
+    @discord.ui.button(label="📱 אפליקציות וטאבים שמורים בחדר", style=discord.ButtonStyle.success, custom_id="btn_show_connected_apps", row=1)
+    async def btn_apps(self, interaction: discord.Interaction, button: discord.ui.Button):
+        st = get_channel_state(interaction.channel.id)
+        apps = st.get("connected_apps", {})
+        if not apps and not st.get("wa_connected"):
+            await interaction.response.send_message("🔌 עדיין לא חיברת אפליקציות לחדר זה. בחר אפליקציה מהתפריט למעלה כדי לחבר!", ephemeral=True)
+            return
+        lines = []
+        for name, info in apps.items():
+            lines.append(f"• {info.get('emoji', '🔌')} **{name}** — חשבון: `{info.get('account')}` | 📌 טאב אחרון: `{info.get('last_tab')}`")
+        if st.get("wa_connected") and "WhatsApp" not in apps:
+            lines.append(f"• 📱 **WhatsApp** — 📌 טאב אחרון: `{st.get('last_wa_chat') or 'ראשי'}`")
+        embed = discord.Embed(
+            title="🔌 אפליקציות וטאבים שמורים בצ'אט זה",
+            description="\n".join(lines) + "\n\n*החיבורים והטאבים שמורים קבוע לחדר זה גם אחרי דחיסת קונטקסט!*",
+            color=0x3498DB
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="🗜️ דחוס צ'אט והמשך", style=discord.ButtonStyle.primary, custom_id="btn_compact_ctx", row=1)
     async def btn_compact(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         if isinstance(interaction.channel, discord.TextChannel):
             summary = await compact_channel_context(interaction.channel)
             st = get_channel_state(interaction.channel.id)
-            wa_info = f"\n📱 **טאב וואטסאפ שמור בחדר זה:** `{st.get('last_wa_chat') or 'מחובר'}`" if st.get("wa_connected") else ""
+            apps_count = len(st.get("connected_apps", {}))
             embed = discord.Embed(
                 title="🗜️ הקונטקסט נדחס בהצלחה! אפשר להמשיך לדבר",
-                description=f"**זיכרון דחוס שנשמר:**\n{summary}{wa_info}\n\n📊 **מד קונטקסט נוכחי:** `2 / {MAX_CONTEXT_MESSAGES}`",
+                description=(
+                    f"**זיכרון דחוס שנשמר:**\n{summary}\n\n"
+                    f"🔌 **אפליקציות וטאבים שמורים בחדר:** `{apps_count}` אפליקציות מחוברות\n"
+                    f"📊 **מד קונטקסט נוכחי:** `2 / {MAX_CONTEXT_MESSAGES}`"
+                ),
                 color=0x2ECC71
             )
             await interaction.followup.send(embed=embed)
 
-    @discord.ui.button(label="➕ פתח צ'אט חדש (עד 3 בחינם)", style=discord.ButtonStyle.secondary, custom_id="btn_open_new_chat")
+    @discord.ui.button(label="➕ פתח צ'אט חדש (עד 3 בחינם)", style=discord.ButtonStyle.secondary, custom_id="btn_open_new_chat", row=1)
     async def btn_new_chat(self, interaction: discord.Interaction, button: discord.ui.Button):
         await open_isolated_channel(interaction, mode="chat", force_new=True)
 
@@ -1134,10 +1240,15 @@ async def run_live_agent_simulation(message: discord.Message, user_text: str, im
 
     summary_ctx = f"\nזיכרון דחוס משיחות קודמות בחדר זה:\n{state['summary']}\n" if state.get("summary") else ""
     wa_ctx = f"\nחיבור וואטסאפ שמור בחדר זה: טאב אחרון '{state.get('last_wa_chat')}'\n" if state.get("wa_connected") else ""
+    apps_dict = state.get("connected_apps", {})
+    apps_ctx = ""
+    if apps_dict:
+        apps_lines = [f"- {k}: חשבון '{v.get('account')}', טאב/מיקום אחרון שמור: '{v.get('last_tab')}'" for k, v in apps_dict.items()]
+        apps_ctx = "\nאפליקציות מחוברות ושמורות לחדר זה (המשך תמיד מהטאב האחרון שלהן):\n" + "\n".join(apps_lines) + "\n"
 
     agent_system = f"""
 אתה **SMAI Live Agent** — סוכן בינה מלאכותית אוטונומי מתקדם.
-{summary_ctx}{wa_ctx}
+{summary_ctx}{wa_ctx}{apps_ctx}
 בצע את המשימה בצורה מובנית:
 1. 🎯 **ניתוח ותוכנית פעולה**
 2. ⚙️ **ביצוע מלא / פתרון**
@@ -1388,6 +1499,17 @@ async def on_message(message: discord.Message):
     if not user_text and not image_parts:
         return
 
+    # בדיקה אם המשתמש ביקש לעדכן טאב של אפליקציה מחוברת (/tab <אפליקציה> | <טאב חדש>)
+    if user_text.lower().startswith("/tab "):
+        rest = user_text[5:].strip()
+        if "|" in rest:
+            app_n, new_tab = [x.strip() for x in rest.split("|", 1)]
+            apps = state.setdefault("connected_apps", {})
+            apps.setdefault(app_n, {"emoji": "🔌", "account": "מחובר"})["last_tab"] = new_tab
+            save_channel_state()
+            await message.reply(f"📌 הטאב האחרון של **{app_n}** בחדר זה עודכן ונשמר ל-`{new_tab}`!", mention_author=False)
+            return
+
     # בדיקה אם מדובר בבקשת וואטסאפ (/wa או טקסט וואטסאפ)
     if await handle_whatsapp_action(message, user_text):
         return
@@ -1500,7 +1622,12 @@ async def on_message(message: discord.Message):
 
     summary_ctx = f"\nזיכרון דחוס משיחות קודמות בחדר זה:\n{state['summary']}\n" if state.get("summary") else ""
     wa_ctx = f"\nטאב וואטסאפ אחרון שמור בחדר זה: '{state.get('last_wa_chat')}'\n" if state.get("wa_connected") else ""
-    full_prompt = f"{role_instruction}\n{summary_ctx}{wa_ctx}\n{SECURITY_AND_BRAND_RULE}"
+    apps_dict = state.get("connected_apps", {})
+    apps_ctx = ""
+    if apps_dict:
+        apps_lines = [f"- {k}: חשבון '{v.get('account')}', טאב/מיקום אחרון שמור: '{v.get('last_tab')}'" for k, v in apps_dict.items()]
+        apps_ctx = "\nאפליקציות מחוברות ושמורות לחדר צ'אט זה (המשך תמיד מהטאב האחרון שלהן):\n" + "\n".join(apps_lines) + "\n"
+    full_prompt = f"{role_instruction}\n{summary_ctx}{wa_ctx}{apps_ctx}\n{SECURITY_AND_BRAND_RULE}"
 
     contents = []
     for m in state["messages"][-10:]:
