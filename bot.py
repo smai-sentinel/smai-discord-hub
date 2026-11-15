@@ -1,7 +1,6 @@
 import os
 import json
 import time
-import io
 import threading
 import subprocess
 from datetime import datetime
@@ -39,37 +38,54 @@ SECURITY_AND_BRAND_RULE = """
 4. שפה: דבר בעברית טבעית, חדה ומקצועית (או בשפה שבה פונים אליך).
 """
 
-# ערוצים עם אימוג'י ייחודי לכל אחד
-CHANNELS_CONFIG = {
-    "💬・צאט-חופשי-smai-v1": {
+AGENT_CONFIG = {
+    "v1": {
+        "title": "💬・smai-v1",
+        "label": "צ'אט כללי (SMAI V1)",
+        "emoji": "💬",
         "model": "SMAI V1",
         "topic": "שיחה חופשית, רעיונות ושאלות מהירות.",
         "prompt": "אתה **SMAI V1** — מודל הבינה המלאכותית המהיר של SMAI. ענה בחדות, בחיוך ובמהירות."
     },
-    "💻・מתכנת-smai-versus": {
+    "versus": {
+        "title": "💻・smai-versus",
+        "label": "מתכנת (SMAI Versus)",
+        "emoji": "💻",
         "model": "SMAI Versus",
         "topic": "מתכנת בכיר: Python, JS, Lua (Roblox), סקריפטים ובאגים.",
         "prompt": "אתה **SMAI Versus** — מודל הדגל לתכנות של SMAI. ספק קוד נקי, מאובטח ומוסבר."
     },
-    "📚・עזרה-בלימודים": {
+    "vision": {
+        "title": "👁️・smai-vision",
+        "label": "סוכן רואה (Vision)",
+        "emoji": "👁️",
+        "model": "SMAI Vision",
+        "topic": "סוכן עם עיניים: שלח תמונה, צילום מסך או קובץ והוא ינתח אותו!",
+        "prompt": "אתה **SMAI Vision** — סוכן הראייה הממוחשבת של SMAI. נתח כל תמונה או צילום מסך שנשלח בדייקנות שיא."
+    },
+    "studies": {
+        "title": "📚・smai-studies",
+        "label": "עזרה בלימודים",
+        "emoji": "📚",
         "model": "SMAI V1",
         "topic": "מורה פרטי למתמטיקה, אנגלית, היסטוריה וסיכומים.",
         "prompt": "אתה **SMAI Studies** — מורה פרטי סבלני. הסבר שלב-אחרי-שלב."
     },
-    "🎨・יוצר-פרומפטים": {
+    "prompts": {
+        "title": "🎨・smai-prompts",
+        "label": "יוצר פרומפטים",
+        "emoji": "🎨",
         "model": "SMAI V1",
         "topic": "כתיבת פרומפטים מקצועיים ל-Midjourney, Flux, Sora.",
         "prompt": "אתה **SMAI Prompts** — מהנדס פרומפטים מקצועי. שדרג רעיונות לפרומפטים באנגלית + הסבר בעברית."
     },
-    "🛡️・smai-sentinel": {
+    "sentinel": {
+        "title": "🛡️・smai-sentinel",
+        "label": "SMAI Sentinel (אבטחה)",
+        "emoji": "🛡️",
         "model": "SMAI Sentinel",
         "topic": "סוכן אבטחה וסייבר לבדיקת קישורים, קבצים והודעות חשודות.",
         "prompt": "אתה **SMAI Sentinel** — סוכן הגנת הסייבר של SMAI. נתח חשדות, סקאמים וקישורים והסבר כיצד להתגונן."
-    },
-    "👁️・סוכן-רואה-vision": {
-        "model": "SMAI Vision",
-        "topic": "סוכן עם עיניים: שלח תמונה, צילום מסך או קובץ והוא ינתח אותו בשידור חי!",
-        "prompt": "אתה **SMAI Vision** — סוכן הראייה הממוחשבת של SMAI. נתח כל תמונה או צילום מסך שנשלח בדייקנות שיא."
     },
 }
 
@@ -79,8 +95,6 @@ ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 chat_histories: dict[str, list[types.Content]] = {}
 MAX_HISTORY = 10
-
-# הפסקה מיידית (Emergency Stop)
 EMERGENCY_STOP = False
 
 BURST_WINDOW = 60
@@ -108,13 +122,11 @@ audit_log: dict[str, list[dict]] = load_json(AUDIT_LOG_FILE)
 
 
 def log_emergency_audit(user_id: int, username: str, user_msg: str, bot_reply: str, agent_type: str):
-    """תיעוד לצרכי חירום / חקירה משטרתית בלבד."""
     uid = str(user_id)
     if uid not in audit_log:
         audit_log[uid] = []
-    
     audit_log[uid].append({
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "username": username,
         "agent": agent_type,
         "user_message": user_msg,
@@ -182,195 +194,350 @@ def sanitize_input(text: str) -> str:
     return text.strip()[:2000]
 
 
-class PrivateAgentView(discord.ui.View):
+class IsolatedAgentLauncher(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="צ'אט כללי (SMAI V1)", style=discord.ButtonStyle.primary, custom_id="btn_v1", emoji="💬")
+    @discord.ui.button(label="צ'אט כללי (SMAI V1)", style=discord.ButtonStyle.primary, custom_id="iso_v1", emoji="💬")
     async def btn_v1(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await open_private_room(interaction, "💬・צאט-חופשי-smai-v1")
+        await open_isolated_channel(interaction, "v1")
 
-    @discord.ui.button(label="מתכנת (SMAI Versus)", style=discord.ButtonStyle.success, custom_id="btn_versus", emoji="💻")
+    @discord.ui.button(label="מתכנת (SMAI Versus)", style=discord.ButtonStyle.success, custom_id="iso_versus", emoji="💻")
     async def btn_versus(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await open_private_room(interaction, "💻・מתכנת-smai-versus")
+        await open_isolated_channel(interaction, "versus")
 
-    @discord.ui.button(label="סוכן רואה (Vision)", style=discord.ButtonStyle.primary, custom_id="btn_vision", emoji="👁️")
+    @discord.ui.button(label="סוכן רואה (Vision)", style=discord.ButtonStyle.primary, custom_id="iso_vision", emoji="👁️")
     async def btn_vision(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await open_private_room(interaction, "👁️・סוכן-רואה-vision")
+        await open_isolated_channel(interaction, "vision")
 
-    @discord.ui.button(label="עזרה בלימודים", style=discord.ButtonStyle.secondary, custom_id="btn_studies", emoji="📚")
+    @discord.ui.button(label="עזרה בלימודים", style=discord.ButtonStyle.secondary, custom_id="iso_studies", emoji="📚")
     async def btn_studies(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await open_private_room(interaction, "📚・עזרה-בלימודים")
+        await open_isolated_channel(interaction, "studies")
 
-    @discord.ui.button(label="SMAI Sentinel (אבטחה)", style=discord.ButtonStyle.danger, custom_id="btn_sentinel", emoji="🛡️")
+    @discord.ui.button(label="יוצר פרומפטים", style=discord.ButtonStyle.secondary, custom_id="iso_prompts", emoji="🎨")
+    async def btn_prompts(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await open_isolated_channel(interaction, "prompts")
+
+    @discord.ui.button(label="SMAI Sentinel (אבטחה)", style=discord.ButtonStyle.danger, custom_id="iso_sentinel", emoji="🛡️")
     async def btn_sentinel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await open_private_room(interaction, "🛡️・smai-sentinel")
+        await open_isolated_channel(interaction, "sentinel")
 
 
-async def open_private_room(interaction: discord.Interaction, channel_key: str):
+async def open_isolated_channel(interaction: discord.Interaction, agent_key: str):
+    """יוצר ערוץ פרטי ומבודד לחלוטין שרק המשתמש והבוט רואים (אף אחד אחר לא רואה)."""
+    guild = interaction.guild
     user = interaction.user
-    conf = CHANNELS_CONFIG[channel_key]
-    channel = interaction.channel
+    conf = AGENT_CONFIG[agent_key]
 
-    if not isinstance(channel, discord.TextChannel):
-        await interaction.response.send_message("ניתן לפתוח חדר פרטי רק מתוך ערוץ הלובי.", ephemeral=True)
+    if not guild or not isinstance(user, discord.Member):
         return
 
-    try:
-        thread = await channel.create_thread(
-            name=f"🔒 {channel_key} - {user.display_name}",
-            type=discord.ChannelType.private_thread,
-            auto_archive_duration=1440,
-            invitable=False
-        )
-        await thread.add_user(user)
+    priv_cat_name = "🔐・חדרים-אישיים-מבודדים"
+    priv_cat = discord.utils.get(guild.categories, name=priv_cat_name)
+    if not priv_cat:
+        cat_overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True),
+        }
+        priv_cat = await guild.create_category(priv_cat_name, overwrites=cat_overwrites)
 
-        welcome_msg = (
+    safe_user = "".join(c for c in user.name.lower() if c.isalnum())[:12] or str(user.id)[-4:]
+    chan_name = f"{conf['emoji']}・{agent_key}-{safe_user}"
+
+    existing = discord.utils.get(priv_cat.text_channels, topic=f"OWNER:{user.id}|AGENT:{agent_key}")
+    if existing:
+        await interaction.response.send_message(f"החדר האישי המבודד שלך כבר מוכן כאן: {existing.mention}", ephemeral=True)
+        return
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(read_messages=False),
+        user: discord.PermissionOverwrite(read_messages=True, send_messages=True, attach_files=True, read_message_history=True),
+        guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True),
+    }
+
+    # אם המשתמש אינו בעל השרת, אפילו מנהלים אחרים לא רואים את הערוץ ביומיום (למעט גישת חירום בפאנל)
+    ch = await guild.create_text_channel(
+        name=chan_name,
+        category=priv_cat,
+        overwrites=overwrites,
+        topic=f"OWNER:{user.id}|AGENT:{agent_key}"
+    )
+
+    embed = discord.Embed(
+        title=f"{conf['emoji']} חדר אישי מבודד — {conf['label']}",
+        description=(
             f"שלום {user.mention}! 👋\n"
-            f"החדר הפרטי שלך עם **{channel_key}** מוכן.\n"
-            f"🔒 **רק אתה והסוכן נמצאים כאן – אף אחד אחר בשרת אינו רואה את ההודעות שלך!**\n"
-            f"👁️ בסוכן זה תוכל גם להעלות תמונות, קוד או שאלות."
+            f"זהו החדר הפרטי והמבודד שלך מול **{conf['model']}**.\n"
+            f"🔒 **אף משתמש אחר בשרת לא רואה את הערוץ הזה או את ההודעות שלך!**\n"
+            f"👁️ ניתן לשלוח כאן טקסט, קוד או תמונות לניתוח חי."
+        ),
+        color=0x2B2D31
+    )
+    await ch.send(embed=embed)
+    await interaction.response.send_message(f"נפתח עבורך חדר אישי מבודד: {ch.mention}", ephemeral=True)
+
+
+async def auto_build_guild(guild: discord.Guild):
+    """בונה ומנקה אוטומטית את השרת למבנה מבודד ומקצועי."""
+    # מחיקת ערוצים ציבוריים ישנים כדי שאף אחד לא יראה צ'אטים של אחרים
+    old_names = [
+        "צאט-חופשי-smai-v1", "מתכנת-smai-versus", "עזרה-בלימודים-smai",
+        "יוצר-פרומפטים-smai", "smai-sentinel-אבטחה", "פאנל-ניהול-smai"
+    ]
+    for ch in list(guild.text_channels):
+        if ch.name in old_names:
+            try:
+                await ch.delete()
+            except Exception:
+                pass
+
+    # 1. קטגוריה ראשית (הכרזות + מצב קולי בקרוב + לובי כניסה)
+    main_cat_name = "🤖・SMAI AI HUB"
+    main_cat = discord.utils.get(guild.categories, name=main_cat_name)
+    if not main_cat:
+        main_cat = await guild.create_category(main_cat_name)
+
+    # ערוץ הכרזות
+    ann_name = "📢・הכרזות-ועדכונים"
+    ann_ch = discord.utils.get(guild.text_channels, name=ann_name)
+    if not ann_ch:
+        ann_overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=True, send_messages=False),
+            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+        }
+        ann_ch = await guild.create_text_channel(ann_name, category=main_cat, overwrites=ann_overwrites)
+        embed_ann = discord.Embed(
+            title="📢 ברוכים הבאים ל-SMAI AI Hub הרשמי!",
+            description=(
+                "🚀 **מערכת סוכני ה-AI המבודדת והמתקדמת ביותר בדיסקורד!**\n\n"
+                "✨ **מה מחכה לכם בשרת?**\n"
+                "• **💬 SMAI V1** — מודל מהיר וחד לשיחות ושאלות.\n"
+                "• **💻 SMAI Versus** — מתכנת על לקוד, סקריפטים ובאגים.\n"
+                "• **👁️ SMAI Vision** — סוכן עם עיניים לניתוח תמונות וצילומי מסך.\n"
+                "• **🛡️ SMAI Sentinel** — סוכן אבטחת מידע וסייבר.\n"
+                "• **🎙️ מצב קולי חי (SMAI Voice)** — **בקרוב מאוד בשרת!**\n\n"
+                "🔒 **פרטיות מלאה:** כל שיחה מתנהלת בחדר פרטי ומבודד שרק אתם רואים!\n"
+                "💎 **עשו Boost לשרת** וקבלו גישה מורחבת ל-**SMAI Versus** ומכסת פרימיום!"
+            ),
+            color=0x5865F2
         )
-        await thread.send(welcome_msg)
-        await interaction.response.send_message(f"החדר הפרטי שלך נפתח בהצלחה: {thread.mention}", ephemeral=True)
-    except Exception as e:
-        await interaction.response.send_message(f"שגיאה בפתיחת חדר: {e}", ephemeral=True)
+        await ann_ch.send(embed=embed_ann)
+
+    # ערוץ קולי נעול "מצב קולי בקרוב"
+    voice_soon_name = "🎙️・מצב קולי - בקרוב!"
+    voice_ch = discord.utils.get(guild.voice_channels, name=voice_soon_name)
+    if not voice_ch:
+        v_overwrites = {
+            guild.default_role: discord.PermissionOverwrite(connect=False, view_channel=True),
+            guild.me: discord.PermissionOverwrite(connect=True, view_channel=True),
+        }
+        await guild.create_voice_channel(voice_soon_name, category=main_cat, overwrites=v_overwrites)
+
+    # ערוץ לובי לפתיחת חדרים פרטיים מבודדים (אף אחד לא יכול לכתוב בו ציבורית)
+    lobby_name = "🔒・פתיחת-צאט-אישי-מבודד"
+    lobby_ch = discord.utils.get(guild.text_channels, name=lobby_name)
+    if not lobby_ch:
+        lobby_overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=True, send_messages=False),
+            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+        }
+        lobby_ch = await guild.create_text_channel(lobby_name, category=main_cat, overwrites=lobby_overwrites)
+        embed_lobby = discord.Embed(
+            title="🔒 פתיחת סוכן AI בחדר אישי מבודד",
+            description=(
+                "כדי לשמור על **פרטיות מוחלטת**, אינכם כותבים בערוץ ציבורי.\n"
+                "לחיצה על כל כפתור למטה תפתח עבורכם **ערוץ פרטי ומבודד משלכם** שאף משתמש אחר בשרת אינו רואה!\n\n"
+                "👇 **בחרו את הסוכן הרצוי:**"
+            ),
+            color=0x2B2D31
+        )
+        for k, v in AGENT_CONFIG.items():
+            embed_lobby.add_field(name=f"{v['emoji']} {v['label']}", value=v['topic'], inline=True)
+        await lobby_ch.send(embed=embed_lobby, view=IsolatedAgentLauncher())
+
+    # 2. פאנל ניהול וסוכן פיקוד (גלוי רק לבעלים ולאדמין)
+    admin_ch_name = "⚙️・פאנל-ניהול-smai"
+    admin_ch = discord.utils.get(guild.text_channels, name=admin_ch_name)
+    if not admin_ch:
+        adm_overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+        }
+        admin_ch = await guild.create_text_channel(admin_ch_name, category=main_cat, overwrites=adm_overwrites)
+        await admin_ch.send(
+            "**⚙️ מרכז הפיקוד והניהול של SMAI מוכן!**\n\n"
+            "🤖 **סוכן ניהול AI מחובר לפאנל זה!**\n"
+            "אתה יכול פשוט לכתוב לי כאן בעברית חופשית מה לעשות, למשל:\n"
+            "• `תוציא הכרזה שמחר עולה עדכון חדש`\n"
+            "• `תן באן ל-@משתמש בגלל הצפה`\n"
+            "• `תן קיק ל-@משתמש`\n"
+            "• `תוסיף 100 קרדיטים ל-@משתמש`\n\n"
+            "🚨 **פקודות מהירות וגישת חירום משטרתית:**\n"
+            "• `!audit @משתמש` — צפייה בשיחות המבודדות של משתמש (גישת חירום/משטרה)\n"
+            "• `!export_audit @משתמש` — הורדת תיק חקירה מלא (JSON) של המשתמש\n"
+            "• `!screen` — תצוגה חיה (צילום מסך בזמן אמת)\n"
+            "• `!stop` / `!resume` — הפסקה מיידית של כל הסוכנים או הפעלה מחדש"
+        )
 
 
 @bot.event
 async def on_ready():
-    bot.add_view(PrivateAgentView())
+    bot.add_view(IsolatedAgentLauncher())
     print(f"SMAI Hub Bot is online as {bot.user}")
+    for g in bot.guilds:
+        try:
+            await auto_build_guild(g)
+            print(f"Auto-configured guild: {g.name}")
+        except Exception as e:
+            print(f"Error configuring guild {g.name}: {e}")
 
 
-@bot.command(name="setup_hub")
-@commands.has_permissions(administrator=True)
-async def setup_hub(ctx: commands.Context):
-    """בונה אוטומטית את ערוצי הסוכנים עם אימוג'ים מיוחדים, לובי פרטי ופאנל ניהול."""
-    guild = ctx.guild
+async def handle_admin_panel_ai(message: discord.Message):
+    """סוכן AI מיוחד בפאנל הניהול שמבצע פעולות בשרת (הכרזות, באנים, קיקים, קרדיטים) לפי בקשת הבעלים."""
+    guild = message.guild
     if not guild:
         return
 
-    await ctx.send("מקים את מערך **SMAI AI Hub**...")
+    text = message.content.strip()
+    mentioned_members = [m for m in message.mentions if m != bot.user]
 
-    cat = discord.utils.get(guild.categories, name="🤖・סוכני SMAI")
-    if not cat:
-        cat = await guild.create_category("🤖・סוכני SMAI")
+    admin_system = """
+אתה סוכן הפיקוד העליון של פאנל הניהול בשרת SMAI.
+הבעלים כותב לך פקודות בשפה חופשית. עליך להחזיר אך ורק JSON תקין (ללא סימני markdown) במבנה הבא:
+{
+  "action": "announce" | "ban" | "kick" | "add_credits" | "emergency_audit" | "reply",
+  "content": "טקסט להכרזה או תשובה לבעלים",
+  "amount": 0,
+  "reason": "סיבה לבאן/קיק"
+}
+הסבר על הפעולות:
+- אם הבעלים מבקש לפרסם או להוציא הכרזה -> action="announce", וב-"content" נסח הכרזה מרשימה ומקצועית לערוץ ההכרזות.
+- אם הבעלים מבקש לתת באן -> action="ban".
+- אם הבעלים מבקש לתת קיק / להעיף -> action="kick".
+- אם הבעלים מבקש להוסיף קרדיטים -> action="add_credits" ושים מספר ב-"amount".
+- אם הבעלים מבקש לראות שיחות של משתמש (חירום/משטרה) -> action="emergency_audit".
+- לכל בקשה או התייעצות אחרת -> action="reply" וענה לו ב-"content".
+"""
+    async with message.channel.typing():
+        try:
+            resp = ai_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=text,
+                config=types.GenerateContentConfig(
+                    system_instruction=admin_system,
+                    response_mime_type="application/json",
+                    temperature=0.3,
+                ),
+            )
+            data = json.loads(resp.text or "{}")
+            action = data.get("action", "reply")
+            content = data.get("content", "בוצע.")
+            amount = int(data.get("amount", 0))
+            reason = data.get("reason", "פקודת הנהלה")
 
-    # יצירת לובי פרטי שבו כל אחד פותח חדר שרק הוא רואה
-    lobby_name = "🔒・פתיחת-חדר-ai-פרטי"
-    lobby_ch = discord.utils.get(guild.text_channels, name=lobby_name)
-    if not lobby_ch:
-        lobby_ch = await guild.create_text_channel(
-            name=lobby_name,
-            category=cat,
-            topic="לחצו על אחד הכפתורים כדי לפתוח חדר AI פרטי משלכם שאף אחד אחר לא רואה!"
-        )
-    
-    embed = discord.Embed(
-        title="🤖 SMAI AI Hub - חדרים פרטיים לכל משתמש",
-        description=(
-            "🔒 **פרטיות מלאה:** כל השיחות עם הסוכנים מתנהלות בחדרים אישיים שרק אתם רואים!\n\n"
-            "👇 **לחצו על הסוכן הרצוי כדי לפתוח חדר פרטי משלכם:**"
-        ),
-        color=0x5865F2
-    )
-    for k, v in CHANNELS_CONFIG.items():
-        embed.add_field(name=k, value=v["topic"], inline=False)
+            if action == "announce":
+                ann_ch = discord.utils.get(guild.text_channels, name="📢・הכרזות-ועדכונים")
+                if ann_ch:
+                    embed = discord.Embed(title="📢 הכרזה חדשה מבית SMAI", description=content, color=0x5865F2)
+                    await ann_ch.send(embed=embed)
+                    await message.reply(f"✅ ההכרזה פורסמה בהצלחה בערוץ {ann_ch.mention}!", mention_author=False)
+                else:
+                    await message.reply("לא נמצא ערוץ הכרזות.", mention_author=False)
 
-    await lobby_ch.send(embed=embed, view=PrivateAgentView())
+            elif action == "ban":
+                if not mentioned_members:
+                    await message.reply("אנא תייג את המשתמש שברצונך לתת לו באן (`@משתמש`).", mention_author=False)
+                else:
+                    for m in mentioned_members:
+                        await guild.ban(m, reason=reason)
+                        await message.reply(f"🔨 המשתמש {m.mention} קיבל **באן** מהשרת! (סיבה: {reason})", mention_author=False)
 
-    # ערוץ פאנל ניהול פרטי לאדמינים
-    admin_ch_name = "⚙️・פאנל-ניהול-smai"
-    admin_ch = discord.utils.get(guild.text_channels, name=admin_ch_name)
-    if not admin_ch:
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(read_messages=False),
-            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-        }
-        admin_ch = await guild.create_text_channel(
-            name=admin_ch_name,
-            overwrites=overwrites,
-            topic="פאנל ניהול קרדיטים, תצוגה חיה, הפסקה מיידית וחקירות משטרתיות."
-        )
+            elif action == "kick":
+                if not mentioned_members:
+                    await message.reply("אנא תייג את המשתמש שברצונך להוציא (`@משתמש`).", mention_author=False)
+                else:
+                    for m in mentioned_members:
+                        await guild.kick(m, reason=reason)
+                        await message.reply(f"👢 המשתמש {m.mention} הוצא (**Kick**) מהשרת! (סיבה: {reason})", mention_author=False)
 
-    await admin_ch.send(
-        "**⚙️ פאנל ניהול SMAI פעיל ומאובטח!**\n\n"
-        "🔴 **שליטה והפסקה מיידית:**\n"
-        "`!stop` — **הפסקה מיידית מוחלטת** של כל הסוכנים בשרת\n"
-        "`!resume` — החזרת פעילות הסוכנים\n\n"
-        "👁️ **תצוגה חיה של המסך (Live Eye):**\n"
-        "`!screen` — מצלם ושולח לפה צילום מסך חי מהמחשב/עמדה\n\n"
-        "💳 **ניהול קרדיטים:**\n"
-        "`!add_credits @משתמש 50` | `!set_credits @משתמש 100` | `!check_credits @משתמש`\n\n"
-        "🚨 **חקירת חירום / שימוש משטרתי בלבד:**\n"
-        "`!audit @משתמש` — צפייה בהודעות אחרונות של משתמש\n"
-        "`!export_audit @משתמש` — הורדת קובץ לוג חקירתי מלא של המשתמש"
-    )
+            elif action == "add_credits":
+                if not mentioned_members:
+                    await message.reply("אנא תייג את המשתמש להוספת קרדיטים.", mention_author=False)
+                else:
+                    for m in mentioned_members:
+                        new_b = add_credits(m.id, amount)
+                        await message.reply(f"💳 נוספו `{amount}` קרדיטים ל-{m.mention}. יתרה חדשה: `{new_b}`.", mention_author=False)
 
-    await ctx.send(f"המערכת הוקמה בהצלחה! הערוץ הפרטי נוצר ב-{lobby_ch.mention} ופאנל הניהול ב-{admin_ch.mention}")
+            elif action == "emergency_audit":
+                if not mentioned_members:
+                    await message.reply("תייג את המשתמש לבדיקת חירום (`@משתמש`).", mention_author=False)
+                else:
+                    for m in mentioned_members:
+                        records = audit_log.get(str(m.id), [])
+                        if not records:
+                            await message.reply(f"אין שיחות מתועדות עבור {m.mention}.", mention_author=False)
+                        else:
+                            msg = f"🚨 **גישת חירום — שיחות אחרונות של {m.mention}:**\n\n"
+                            for r in records[-5:]:
+                                msg += f"🕒 `{r['timestamp']}` [{r['agent']}]\n**משתמש:** {r['user_message']}\n**מענה:** {r['bot_reply'][:150]}...\n---\n"
+                            await message.reply(msg[:1900], mention_author=False)
+            else:
+                await message.reply(content, mention_author=False)
+
+        except Exception as e:
+            await message.reply(f"שגיאה בביצוע פעולת ניהול: {e}", mention_author=False)
 
 
 @bot.command(name="stop")
 @commands.has_permissions(administrator=True)
 async def cmd_emergency_stop(ctx: commands.Context):
-    """הפסקה מיידית של כל הסוכנים."""
     global EMERGENCY_STOP
     EMERGENCY_STOP = True
-    await ctx.send("🚨 **הפסקה מיידית הופעלה!** כל הסוכנים הושבתו עד להודעה חדשה.")
+    await ctx.send("🚨 **הפסקה מיידית הופעלה!** כל הסוכנים הושבתו.")
 
 
 @bot.command(name="resume")
 @commands.has_permissions(administrator=True)
 async def cmd_resume(ctx: commands.Context):
-    """החזרת פעילות הסוכנים."""
     global EMERGENCY_STOP
     EMERGENCY_STOP = False
-    await ctx.send("✅ **הפעילות חודשה!** כל הסוכנים חזרו לפעול כרגיל.")
+    await ctx.send("✅ **הפעילות חודשה!** כל הסוכנים חזרו לפעול.")
 
 
 @bot.command(name="screen")
 @commands.has_permissions(administrator=True)
 async def cmd_screen(ctx: commands.Context):
-    """תצוגה חיה: מצלם את המסך הנוכחי ושולח לפאנל הניהול."""
     out_img = "/tmp/smai_live_screen.png"
     try:
         subprocess.run(["screencapture", "-x", out_img], check=True)
         await ctx.send("👁️ **תצוגה חיה מהמסך:**", file=discord.File(out_img))
     except Exception as e:
-        await ctx.send(f"שגיאה בלכידת תצוגה חיה: {e}")
+        await ctx.send(f"שגיאה בלכידת מסך: {e}")
 
 
 @bot.command(name="audit")
 @commands.has_permissions(administrator=True)
 async def cmd_audit(ctx: commands.Context, member: discord.Member):
-    uid = str(member.id)
-    records = audit_log.get(uid, [])
+    records = audit_log.get(str(member.id), [])
     if not records:
         await ctx.send(f"אין רשומות שיחה עבור {member.mention}.")
         return
-
-    recent = records[-5:]
-    msg = f"🔍 **תיעוד חירום עבור {member.mention} (מציג {len(recent)} אחרונים):**\n\n"
-    for r in recent:
+    msg = f"🔍 **תיעוד חירום עבור {member.mention}:**\n\n"
+    for r in records[-5:]:
         msg += f"🕒 `{r['timestamp']}` [{r['agent']}]\n**משתמש:** {r['user_message']}\n**מענה:** {r['bot_reply'][:150]}...\n---\n"
-    for i in range(0, len(msg), 1900):
-        await ctx.send(msg[i:i + 1900])
+    await ctx.send(msg[:1900])
 
 
 @bot.command(name="export_audit")
 @commands.has_permissions(administrator=True)
 async def cmd_export_audit(ctx: commands.Context, member: discord.Member):
-    uid = str(member.id)
-    records = audit_log.get(uid, [])
+    records = audit_log.get(str(member.id), [])
     if not records:
         await ctx.send(f"אין היסטוריה שמורה עבור {member.mention}.")
         return
-
     out_file = f"/tmp/audit_{member.id}.json"
     with open(out_file, "w", encoding="utf-8") as f:
         json.dump(records, f, ensure_ascii=False, indent=2)
-
     await ctx.send(f"קובץ תיעוד חקירתי עבור {member.mention}:", file=discord.File(out_file))
 
 
@@ -378,22 +545,7 @@ async def cmd_export_audit(ctx: commands.Context, member: discord.Member):
 @commands.has_permissions(administrator=True)
 async def cmd_add_credits(ctx: commands.Context, member: discord.Member, amount: int):
     new_bal = add_credits(member.id, amount)
-    await ctx.send(f"עודכן: ל-{member.mention} נוספו `{amount}` קרדיטים. יתרה נוכחית: `{new_bal}`.")
-
-
-@bot.command(name="set_credits")
-@commands.has_permissions(administrator=True)
-async def cmd_set_credits(ctx: commands.Context, member: discord.Member, amount: int):
-    user_credits[str(member.id)] = max(0, amount)
-    save_json(CREDITS_FILE, user_credits)
-    await ctx.send(f"יתרת הקרדיטים של {member.mention} הוגדרה ל-`{user_credits[str(member.id)]}`.")
-
-
-@bot.command(name="check_credits")
-@commands.has_permissions(administrator=True)
-async def cmd_check_credits(ctx: commands.Context, member: discord.Member):
-    bal = get_credits(member.id)
-    await ctx.send(f"ל-{member.mention} יש כרגע `{bal}` קרדיטים.")
+    await ctx.send(f"עודכן: ל-{member.mention} נוספו `{amount}` קרדיטים. יתרה: `{new_bal}`.")
 
 
 @bot.command(name="my_credits")
@@ -402,7 +554,7 @@ async def cmd_my_credits(ctx: commands.Context):
         await ctx.reply("אתה בעלים/מנהל — הקרדיטים שלך הם **ללא הגבלה**.", mention_author=False)
         return
     bal = get_credits(ctx.author.id)
-    tier = "פרימיום / Booster (SMAI Versus)" if is_premium_user(ctx.author) else "חינמי (SMAI V1)"
+    tier = "פרימיום / Booster (SMAI Versus)" if is_premium_user(ctx.author) else "דמו חינמי (SMAI V1)"
     await ctx.reply(f"יתרת הקרדיטים שלך: `{bal}` | דרגה: **{tier}**", mention_author=False)
 
 
@@ -416,23 +568,30 @@ async def on_message(message: discord.Message):
     if message.content.startswith("!"):
         return
 
-    if EMERGENCY_STOP and not is_admin_or_owner(message.author):
-        await message.reply("המערכת נמצאת כרגע בהפסקה יזומה ע\"י ההנהלה. אנא נסה שוב מאוחר יותר.", mention_author=False)
+    ch_name = getattr(message.channel, "name", "")
+    ch_topic = getattr(message.channel, "topic", "") or ""
+
+    # אם הבעלים כותב בפאנל הניהול -> סוכן הפיקוד העליון מבצע
+    if "פאנל-ניהול" in ch_name and is_admin_or_owner(message.author):
+        await handle_admin_panel_ai(message)
         return
 
-    is_thread = isinstance(message.channel, discord.Thread)
+    # בדיקה אם זה חדר אישי מבודד או DM
+    is_isolated_room = "OWNER:" in ch_topic
     is_dm = isinstance(message.channel, discord.DMChannel)
-    ch_name = getattr(message.channel, "name", "")
 
-    # התאמת סוכן לערוץ
-    agent_key = "💬・צאט-חופשי-smai-v1"
-    for k in CHANNELS_CONFIG.keys():
-        clean_k = k.split("・")[-1]
-        if clean_k in ch_name:
-            agent_key = k
-            break
+    if not (is_isolated_room or is_dm):
+        return
 
-    conf = CHANNELS_CONFIG[agent_key]
+    if EMERGENCY_STOP and not is_admin_or_owner(message.author):
+        await message.reply("המערכת נמצאת כרגע בהפסקה יזומה ע\"י ההנהלה.", mention_author=False)
+        return
+
+    agent_key = "v1"
+    if "AGENT:" in ch_topic:
+        agent_key = ch_topic.split("AGENT:")[-1].strip()
+
+    conf = AGENT_CONFIG.get(agent_key, AGENT_CONFIG["v1"])
     brand_model = conf["model"]
 
     is_owner = is_admin_or_owner(message.author)
@@ -454,12 +613,8 @@ async def on_message(message: discord.Message):
             )
             return
 
-    user_text = message.content
-    if bot.user:
-        user_text = user_text.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "")
-    user_text = sanitize_input(user_text)
+    user_text = sanitize_input(message.content)
 
-    # בדיקת קבצים מצורפים / תמונות (סוכן עם עיניים - Vision)
     image_parts = []
     if message.attachments:
         for att in message.attachments:
@@ -479,7 +634,7 @@ async def on_message(message: discord.Message):
 
     chan_key = str(message.channel.id)
     history = chat_histories.setdefault(chan_key, [])
-    
+
     parts = []
     if user_text:
         parts.append(types.Part.from_text(text=user_text))
@@ -506,7 +661,6 @@ async def on_message(message: discord.Message):
             if not is_owner:
                 add_credits(message.author.id, -1)
 
-            # תיעוד חקירתי מוצפן
             log_emergency_audit(
                 user_id=message.author.id,
                 username=str(message.author),
