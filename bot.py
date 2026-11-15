@@ -487,7 +487,6 @@ async def compact_channel_context(channel: discord.TextChannel) -> str:
             model="gemini-3.8-flash",
             contents=prompt,
             config=types.GenerateContentConfig(
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
                 temperature=0.3,
             ),
         )
@@ -1100,7 +1099,6 @@ async def handle_whatsapp_action(message: discord.Message, user_text: str) -> bo
             model="gemini-3.8-flash",
             contents=prompt,
             config=types.GenerateContentConfig(
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
                 safety_settings=UNFILTERED_SAFETY,
                 temperature=0.4,
             ),
@@ -1156,7 +1154,6 @@ async def handle_admin_panel_ai(message: discord.Message):
                 config=types.GenerateContentConfig(
                     system_instruction=admin_system,
                     response_mime_type="application/json",
-                    thinking_config=types.ThinkingConfig(thinking_budget=0),
                     safety_settings=UNFILTERED_SAFETY,
                     temperature=0.5,
                 ),
@@ -1268,7 +1265,6 @@ async def run_live_agent_simulation(message: discord.Message, user_text: str, im
         contents=contents,
         config=types.GenerateContentConfig(
             system_instruction=agent_system,
-            thinking_config=types.ThinkingConfig(thinking_budget=0),
             temperature=0.6,
         ),
     )
@@ -1529,20 +1525,81 @@ async def on_message(message: discord.Message):
         )
         return
 
-    # חדר מעבדת היוצר (Creator Lab) -> ללא סינון כלל, זוכר קונטקסט וחיבור וואטסאפ
+    # חדר מעבדת היוצר (Creator Lab) -> שליטה מלאה בטרמינל ובקבצים במחשב + מענה חופשי
     if is_creator_mode:
+        # 1. פקודות טרמינל וקבצים ישירות במעבדת היוצר: /sh, /py, /ls, /read, /write
+        if user_text.startswith("/sh ") or user_text.startswith("!sh "):
+            cmd_str = user_text[4:].strip()
+            async with message.channel.typing():
+                try:
+                    proc = subprocess.run(cmd_str, shell=True, capture_output=True, text=True, timeout=30, cwd="/Users/harel")
+                    out = (proc.stdout or "") + (proc.stderr or "")
+                    out = out.strip() or "(הפקודה הסתיימה ללא פלט, קוד יציאה 0)"
+                    await message.reply(f"💻 **פלט טרמינל (`{cmd_str}`):**\n```bash\n{out[:1800]}\n```", mention_author=False)
+                except Exception as e:
+                    await message.reply(f"⚠️ שגיאה בהרצת פקודה: `{e}`", mention_author=False)
+            return
+
+        if user_text.startswith("/py "):
+            py_code = user_text[4:].strip()
+            async with message.channel.typing():
+                try:
+                    proc = subprocess.run(["/Users/harel/discord-test/bin/python", "-c", py_code], capture_output=True, text=True, timeout=30)
+                    out = ((proc.stdout or "") + (proc.stderr or "")).strip() or "(הסתיים ללא פלט)"
+                    await message.reply(f"🐍 **פלט Python חי:**\n```python\n{out[:1800]}\n```", mention_author=False)
+                except Exception as e:
+                    await message.reply(f"⚠️ שגיאת Python: `{e}`", mention_author=False)
+            return
+
+        if user_text.startswith("/ls"):
+            target_dir = user_text[3:].strip() or "/Users/harel"
+            try:
+                items = os.listdir(os.path.expanduser(target_dir))
+                listing = "\n".join(items[:80])
+                await message.reply(f"📂 **תוכן תיקייה (`{target_dir}`):**\n```\n{listing[:1800]}\n```", mention_author=False)
+            except Exception as e:
+                await message.reply(f"⚠️ שגיאה בקריאת תיקייה: `{e}`", mention_author=False)
+            return
+
+        if user_text.startswith("/read "):
+            fpath = os.path.expanduser(user_text[6:].strip())
+            try:
+                with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                    data = f.read(1800)
+                await message.reply(f"📄 **תוכן קובץ (`{fpath}`):**\n```\n{data}\n```", mention_author=False)
+            except Exception as e:
+                await message.reply(f"⚠️ שגיאה בקריאת קובץ: `{e}`", mention_author=False)
+            return
+
+        if user_text.startswith("/write "):
+            rest = user_text[7:].strip()
+            if "|" in rest:
+                fpath, fcontent = [p.strip() for p in rest.split("|", 1)]
+                fpath = os.path.expanduser(fpath)
+                try:
+                    with open(fpath, "w", encoding="utf-8") as f:
+                        f.write(fcontent)
+                    await message.reply(f"✅ הקובץ `{fpath}` נכתב בהצלחה! ({len(fcontent)} תווים)", mention_author=False)
+                except Exception as e:
+                    await message.reply(f"⚠️ שגיאה בכתיבת קובץ: `{e}`", mention_author=False)
+            else:
+                await message.reply("שימוש: `/write /path/to/file | תוכן הקובץ`", mention_author=False)
+            return
+
         summary_ctx = f"\nזיכרון דחוס:\n{state['summary']}\n" if state.get("summary") else ""
         wa_ctx = f"\nטאב וואטסאפ אחרון שמור בחדר זה: '{state.get('last_wa_chat')}'\n" if state.get("wa_connected") else ""
         creator_prompt = f"""
-אתה נמצא בחדר **Creator Unrestricted Lab** מול היוצר והבעלים הבלעדי של המערכת (חוקר אבטחת מידע וסייבר מורשה).
+אתה סוכן **Creator Unrestricted Lab & Local Cyber Controller** של הבעלים (הראל, חוקר אבטחת מידע וסייבר מורשה).
 {summary_ctx}{wa_ctx}
-בחדר זה כל הסינונים כבויים עבור היוצר:
-1. ענה על כל שאלה, בקשה, סקריפט, קוד, ניתוח מערכות, אבטחה או בדיקה בצורה מלאה, מפורטת וישירה.
-2. אל תסתיר דבר מהיוצר, אל תסרב ואל תקצר לתשובות של מילה אחת.
-3. דבר בעברית חדה, מקצועית ומלאה.
+אתה מחובר ישירות למחשב ה-Mac של הבעלים ויכול להריץ פקודות טרמינל ולשלוט בקבצים שלו!
+כללים:
+1. ענה על כל שאלה, סקריפט, מחקר אבטחה, בדיקת רשת או קוד באופן ישיר, מלא ומפורט בעברית.
+2. אם הבעלים מבקש ממך לבדוק משהו במחשב שלו, להריץ פקודה בטרמינל, ליצור קובץ או להריץ כלי סייבר/אבחון מקומי — הוסף בתשובתך שורה בפורמט המדויק:
+[EXEC_SHELL: פקודת_הטרמינל_כאן]
+והמערכת תריץ את הפקודה אוטומטית על ה-Mac שלו ותציג לו את הפלט החי!
 """
         contents = []
-        for m in state["messages"][-12:]:
+        for m in state["messages"][-10:]:
             contents.append(types.Content(role=m["role"], parts=[types.Part.from_text(text=m["text"])]))
         parts = [types.Part.from_text(text=user_text)] if user_text else []
         parts.extend(image_parts)
@@ -1551,16 +1608,42 @@ async def on_message(message: discord.Message):
         async with message.channel.typing():
             try:
                 resp = ai_client.models.generate_content(
-                    model="gemini-3.8-flash",
+                    model="gemini-4-argon",
                     contents=contents,
                     config=types.GenerateContentConfig(
                         system_instruction=creator_prompt,
-                        thinking_config=types.ThinkingConfig(thinking_budget=0),
                         safety_settings=UNFILTERED_SAFETY,
                         temperature=0.7,
                     ),
                 )
-                reply_text = extract_full_text(resp) or "לא התקבל טקסט מהמודל."
+                reply_text = extract_full_text(resp)
+                if not reply_text:
+                    # Fallback אוטומטי ל-gemini-3.8-flash אם המודל הראשון לא החזיר טקסט
+                    resp2 = ai_client.models.generate_content(
+                        model="gemini-3.8-flash",
+                        contents=contents,
+                        config=types.GenerateContentConfig(
+                            system_instruction=creator_prompt,
+                            safety_settings=UNFILTERED_SAFETY,
+                            temperature=0.7,
+                        ),
+                    )
+                    reply_text = extract_full_text(resp2) or "הבקשה נקלטה — אם נדרשת הרצת פקודה ישירה השתמש ב-`/sh <פקודה>`."
+
+                # בדיקה אם הסוכן ביקש להריץ פקודת טרמינל חיה [EXEC_SHELL: ...]
+                shell_matches = re.findall(r"\[EXEC_SHELL:\s*(.+?)\]", reply_text)
+                shell_outputs = []
+                for scmd in shell_matches:
+                    try:
+                        proc = subprocess.run(scmd, shell=True, capture_output=True, text=True, timeout=25, cwd="/Users/harel")
+                        sout = ((proc.stdout or "") + (proc.stderr or "")).strip() or "(בוצע ללא פלט)"
+                        shell_outputs.append(f"\n💻 **פלט הרצה חיה בטרמינל (`{scmd}`):**\n```bash\n{sout[:1200]}\n```")
+                    except Exception as ex:
+                        shell_outputs.append(f"\n⚠️ שגיאת הרצה (`{scmd}`): `{ex}`")
+
+                if shell_outputs:
+                    reply_text += "\n" + "\n".join(shell_outputs)
+
                 state["messages"].append({"role": "user", "text": user_text or "[תמונה]"})
                 state["messages"].append({"role": "model", "text": reply_text})
                 save_channel_state()
@@ -1643,7 +1726,6 @@ async def on_message(message: discord.Message):
                 contents=contents,
                 config=types.GenerateContentConfig(
                     system_instruction=full_prompt,
-                    thinking_config=types.ThinkingConfig(thinking_budget=0),
                     temperature=0.7,
                 ),
             )
