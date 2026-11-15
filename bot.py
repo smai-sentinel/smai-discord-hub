@@ -24,10 +24,10 @@ DEMO_REFILL_SECONDS = 48 * 3600  # חידוש דמו כל יומיים
 BOOSTER_BONUS_CREDITS = 60
 
 SMAI_MODELS = {
-    "SMAI V1": "gemini-2.5-flash",
-    "SMAI Versus": "gemini-2.5-pro",
-    "SMAI Sentinel": "gemini-2.5-flash",
-    "SMAI Vision": "gemini-2.5-flash",
+    "SMAI V1": "gemini-3.8-flash",
+    "SMAI Versus": "gemini-4-argon",
+    "SMAI Sentinel": "gemini-3.8-flash",
+    "SMAI Vision": "gemini-3.8-flash",
 }
 
 SECURITY_AND_BRAND_RULE = """
@@ -282,7 +282,8 @@ async def auto_build_guild(guild: discord.Guild):
     # מחיקת ערוצים ציבוריים ישנים כדי שאף אחד לא יראה צ'אטים של אחרים
     old_names = [
         "צאט-חופשי-smai-v1", "מתכנת-smai-versus", "עזרה-בלימודים-smai",
-        "יוצר-פרומפטים-smai", "smai-sentinel-אבטחה", "פאנל-ניהול-smai"
+        "יוצר-פרומפטים-smai", "smai-sentinel-אבטחה", "פאנל-ניהול-smai",
+        "סוכני-smai-חדר-פרטי", "🔒・פתיחת-חדר-ai-פרטי"
     ]
     for ch in list(guild.text_channels):
         if ch.name in old_names:
@@ -421,7 +422,7 @@ async def handle_admin_panel_ai(message: discord.Message):
     async with message.channel.typing():
         try:
             resp = ai_client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-3.8-flash",
                 contents=text,
                 config=types.GenerateContentConfig(
                     system_instruction=admin_system,
@@ -580,6 +581,41 @@ async def on_message(message: discord.Message):
     is_isolated_room = "OWNER:" in ch_topic
     is_dm = isinstance(message.channel, discord.DMChannel)
 
+    # אם משתמש כותב בערוץ רגיל (כמו general), מוחקים את ההודעה כדי שאף אחד לא יראה ומעבירים אותו לחדר מבודד משלו!
+    if not (is_isolated_room or is_dm) and message.guild and isinstance(message.author, discord.Member):
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        priv_cat_name = "🔐・חדרים-אישיים-מבודדים"
+        priv_cat = discord.utils.get(message.guild.categories, name=priv_cat_name)
+        if not priv_cat:
+            cat_overwrites = {
+                message.guild.default_role: discord.PermissionOverwrite(read_messages=False),
+                message.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True),
+            }
+            priv_cat = await message.guild.create_category(priv_cat_name, overwrites=cat_overwrites)
+
+        user = message.author
+        safe_user = "".join(c for c in user.name.lower() if c.isalnum())[:12] or str(user.id)[-4:]
+        iso_ch = discord.utils.get(priv_cat.text_channels, topic=f"OWNER:{user.id}|AGENT:v1")
+        if not iso_ch:
+            overwrites = {
+                message.guild.default_role: discord.PermissionOverwrite(read_messages=False),
+                user: discord.PermissionOverwrite(read_messages=True, send_messages=True, attach_files=True, read_message_history=True),
+                message.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True),
+            }
+            iso_ch = await message.guild.create_text_channel(
+                name=f"💬・v1-{safe_user}",
+                category=priv_cat,
+                overwrites=overwrites,
+                topic=f"OWNER:{user.id}|AGENT:v1"
+            )
+        await iso_ch.send(f"🔒 {user.mention} העברתי את ההודעה שלך לכאן כדי שאף אחד אחר לא יראה את הצ'אט שלך!\n> **{message.content}**")
+        message.channel = iso_ch
+        ch_topic = f"OWNER:{user.id}|AGENT:v1"
+        is_isolated_room = True
+
     if not (is_isolated_room or is_dm):
         return
 
@@ -629,7 +665,7 @@ async def on_message(message: discord.Message):
     if brand_model == "SMAI Versus" and not is_premium:
         brand_model = "SMAI V1"
 
-    real_model = SMAI_MODELS.get(brand_model, "gemini-2.5-flash")
+    real_model = SMAI_MODELS.get(brand_model, "gemini-3.8-flash")
     full_prompt = f"{conf['prompt']}\n\n{SECURITY_AND_BRAND_RULE}"
 
     chan_key = str(message.channel.id)
