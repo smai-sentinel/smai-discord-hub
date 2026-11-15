@@ -8,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from collections import defaultdict
 import discord
 from discord.ext import commands
+import edge_tts
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
@@ -224,58 +225,104 @@ class IsolatedAgentLauncher(discord.ui.View):
         await open_isolated_channel(interaction, "sentinel")
 
 
+    @discord.ui.button(label="🎙️ חבר סוכן לחדר קולי", style=discord.ButtonStyle.success, custom_id="iso_voice_join", emoji="🔊")
+    async def btn_voice_join(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        member = interaction.user
+        if not isinstance(member, discord.Member) or not member.voice or not member.voice.channel:
+            await interaction.followup.send("🎙️ היכנס קודם לערוץ הקולי **`🎙️・שיחה-קולית-חיה-smai`** ואז לחץ על הכפתור!", ephemeral=True)
+            return
+        v_ch = member.voice.channel
+        vc = interaction.guild.voice_client if interaction.guild else None
+        try:
+            if vc and vc.is_connected():
+                await vc.move_to(v_ch)
+            else:
+                vc = await v_ch.connect()
+            await interaction.followup.send(f"🔊 התחברתי לערוץ הקולי {v_ch.mention}! כל תשובה שאענה לך בחדר הפרטי תושמע לך גם בקול חי!", ephemeral=True)
+            await speak_in_voice(interaction.guild, "שלום! מערכת סמאי קולית מחוברת ומוכנה לשיחה.")
+        except Exception as e:
+            await interaction.followup.send(f"שגיאה בחיבור קולי: {e}", ephemeral=True)
+
+
+async def speak_in_voice(guild: discord.Guild | None, text: str):
+    """משמיע טקסט בעברית בקול אנושי חי בתוך הערוץ הקולי שבו הבוט נמצא."""
+    if not guild or not guild.voice_client or not guild.voice_client.is_connected():
+        return
+    vc: discord.VoiceClient = guild.voice_client
+    clean_text = text.replace("*", "").replace("`", "").replace("#", "")[:400]
+    audio_file = f"/tmp/smai_tts_{guild.id}.mp3"
+    try:
+        communicate = edge_tts.Communicate(clean_text, voice="he-IL-AvriNeural")
+        await communicate.save(audio_file)
+        if vc.is_playing():
+            vc.stop()
+        ffmpeg_path = "/Users/harel/homebrew/bin/ffmpeg"
+        if not os.path.exists(ffmpeg_path):
+            ffmpeg_path = "ffmpeg"
+        vc.play(discord.FFmpegPCMAudio(audio_file, executable=ffmpeg_path))
+    except Exception as e:
+        print(f"TTS Error: {e}")
+
+
 async def open_isolated_channel(interaction: discord.Interaction, agent_key: str):
     """יוצר ערוץ פרטי ומבודד לחלוטין שרק המשתמש והבוט רואים (אף אחד אחר לא רואה)."""
+    await interaction.response.defer(ephemeral=True)
     guild = interaction.guild
     user = interaction.user
     conf = AGENT_CONFIG[agent_key]
 
     if not guild or not isinstance(user, discord.Member):
+        await interaction.followup.send("שגיאה בזיהוי השרת.", ephemeral=True)
         return
 
-    priv_cat_name = "🔐・חדרים-אישיים-מבודדים"
-    priv_cat = discord.utils.get(guild.categories, name=priv_cat_name)
-    if not priv_cat:
-        cat_overwrites = {
+    try:
+        priv_cat_name = "🔐・חדרים-אישיים-מבודדים"
+        priv_cat = discord.utils.get(guild.categories, name=priv_cat_name)
+        if not priv_cat:
+            cat_overwrites = {
+                guild.default_role: discord.PermissionOverwrite(read_messages=False),
+                guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True, manage_roles=True),
+            }
+            priv_cat = await guild.create_category(priv_cat_name, overwrites=cat_overwrites)
+
+        safe_user = "".join(c for c in user.name.lower() if c.isalnum())[:12] or str(user.id)[-4:]
+        chan_name = f"{conf['emoji']}・{agent_key}-{safe_user}"
+
+        existing = discord.utils.get(priv_cat.text_channels, topic=f"OWNER:{user.id}|AGENT:{agent_key}")
+        if existing:
+            await existing.send(f"👋 {user.mention} החדר האישי שלך כאן מוכן!")
+            await interaction.followup.send(f"✅ החדר האישי המבודד שלך מוכן כאן: {existing.mention}", ephemeral=True)
+            return
+
+        overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
-            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True),
+            user: discord.PermissionOverwrite(read_messages=True, send_messages=True, attach_files=True, read_message_history=True),
+            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True, manage_roles=True),
         }
-        priv_cat = await guild.create_category(priv_cat_name, overwrites=cat_overwrites)
 
-    safe_user = "".join(c for c in user.name.lower() if c.isalnum())[:12] or str(user.id)[-4:]
-    chan_name = f"{conf['emoji']}・{agent_key}-{safe_user}"
+        ch = await guild.create_text_channel(
+            name=chan_name,
+            category=priv_cat,
+            overwrites=overwrites,
+            topic=f"OWNER:{user.id}|AGENT:{agent_key}"
+        )
 
-    existing = discord.utils.get(priv_cat.text_channels, topic=f"OWNER:{user.id}|AGENT:{agent_key}")
-    if existing:
-        await interaction.response.send_message(f"החדר האישי המבודד שלך כבר מוכן כאן: {existing.mention}", ephemeral=True)
-        return
-
-    overwrites = {
-        guild.default_role: discord.PermissionOverwrite(read_messages=False),
-        user: discord.PermissionOverwrite(read_messages=True, send_messages=True, attach_files=True, read_message_history=True),
-        guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True),
-    }
-
-    # אם המשתמש אינו בעל השרת, אפילו מנהלים אחרים לא רואים את הערוץ ביומיום (למעט גישת חירום בפאנל)
-    ch = await guild.create_text_channel(
-        name=chan_name,
-        category=priv_cat,
-        overwrites=overwrites,
-        topic=f"OWNER:{user.id}|AGENT:{agent_key}"
-    )
-
-    embed = discord.Embed(
-        title=f"{conf['emoji']} חדר אישי מבודד — {conf['label']}",
-        description=(
-            f"שלום {user.mention}! 👋\n"
-            f"זהו החדר הפרטי והמבודד שלך מול **{conf['model']}**.\n"
-            f"🔒 **אף משתמש אחר בשרת לא רואה את הערוץ הזה או את ההודעות שלך!**\n"
-            f"👁️ ניתן לשלוח כאן טקסט, קוד או תמונות לניתוח חי."
-        ),
-        color=0x2B2D31
-    )
-    await ch.send(embed=embed)
-    await interaction.response.send_message(f"נפתח עבורך חדר אישי מבודד: {ch.mention}", ephemeral=True)
+        embed = discord.Embed(
+            title=f"{conf['emoji']} חדר אישי מבודד — {conf['label']}",
+            description=(
+                f"שלום {user.mention}! 👋\n"
+                f"זהו החדר הפרטי והמבודד שלך מול **{conf['model']}**.\n"
+                f"🔒 **אף משתמש אחר בשרת לא רואה את הערוץ הזה או את ההודעות שלך!**\n"
+                f"🎙️ **רוצה תשובות גם בקול חי?** היכנס לערוץ הקולי `🎙️・שיחה-קולית-חיה-smai` וכתוב כאן `!voice`!\n"
+                f"👁️ ניתן לשלוח כאן טקסט, קוד או תמונות לניתוח חי."
+            ),
+            color=0x2B2D31
+        )
+        await ch.send(content=user.mention, embed=embed)
+        await interaction.followup.send(f"✅ נפתח עבורך חדר אישי מבודד: {ch.mention}", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"שגיאה בפתיחת חדר מבודד: {e}", ephemeral=True)
 
 
 async def auto_build_guild(guild: discord.Guild):
@@ -325,15 +372,22 @@ async def auto_build_guild(guild: discord.Guild):
         )
         await ann_ch.send(embed=embed_ann)
 
-    # ערוץ קולי נעול "מצב קולי בקרוב"
-    voice_soon_name = "🎙️・מצב קולי - בקרוב!"
-    voice_ch = discord.utils.get(guild.voice_channels, name=voice_soon_name)
+    # ערוץ קולי חי פעיל "שיחה קולית חיה SMAI"
+    old_voice = discord.utils.get(guild.voice_channels, name="🎙️・מצב קולי - בקרוב!")
+    if old_voice:
+        try:
+            await old_voice.delete()
+        except Exception:
+            pass
+
+    voice_live_name = "🎙️・שיחה-קולית-חיה-smai"
+    voice_ch = discord.utils.get(guild.voice_channels, name=voice_live_name)
     if not voice_ch:
         v_overwrites = {
-            guild.default_role: discord.PermissionOverwrite(connect=False, view_channel=True),
-            guild.me: discord.PermissionOverwrite(connect=True, view_channel=True),
+            guild.default_role: discord.PermissionOverwrite(connect=True, speak=True, view_channel=True),
+            guild.me: discord.PermissionOverwrite(connect=True, speak=True, view_channel=True),
         }
-        await guild.create_voice_channel(voice_soon_name, category=main_cat, overwrites=v_overwrites)
+        await guild.create_voice_channel(voice_live_name, category=main_cat, overwrites=v_overwrites)
 
     # ערוץ מדריך ורשימת כל הפקודות
     cmds_name = "📖・כל-הפקודות-והמדריך"
@@ -385,7 +439,7 @@ async def auto_build_guild(guild: discord.Guild):
         )
         await cmds_ch.send(embed=embed_cmds)
 
-    # ערוץ לובי לפתיחת חדרים פרטיים מבודדים (אף אחד לא יכול לכתוב בו ציבורית)
+    # ערוץ לובי לפתיחת חדרים פרטיים מבודדים (תמיד מרענן את כפתורי הלובי כדי שיעבדו 100%)
     lobby_name = "🔒・פתיחת-צאט-אישי-מבודד"
     lobby_ch = discord.utils.get(guild.text_channels, name=lobby_name)
     if not lobby_ch:
@@ -394,18 +448,25 @@ async def auto_build_guild(guild: discord.Guild):
             guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True),
         }
         lobby_ch = await guild.create_text_channel(lobby_name, category=main_cat, overwrites=lobby_overwrites)
-        embed_lobby = discord.Embed(
-            title="🔒 פתיחת סוכן AI בחדר אישי מבודד",
-            description=(
-                "כדי לשמור על **פרטיות מוחלטת**, אינכם כותבים בערוץ ציבורי.\n"
-                "לחיצה על כל כפתור למטה תפתח עבורכם **ערוץ פרטי ומבודד משלכם** שאף משתמש אחר בשרת אינו רואה!\n\n"
-                "👇 **בחרו את הסוכן הרצוי:**"
-            ),
-            color=0x2B2D31
-        )
-        for k, v in AGENT_CONFIG.items():
-            embed_lobby.add_field(name=f"{v['emoji']} {v['label']}", value=v['topic'], inline=True)
-        await lobby_ch.send(embed=embed_lobby, view=IsolatedAgentLauncher())
+    else:
+        try:
+            await lobby_ch.purge(limit=10)
+        except Exception:
+            pass
+
+    embed_lobby = discord.Embed(
+        title="🔒 פתיחת סוכן AI בחדר אישי מבודד + מצב קולי חי",
+        description=(
+            "כדי לשמור על **פרטיות מוחלטת**, כל שיחה מתנהלת בערוץ אישי שרק אתם רואים.\n"
+            "• לחצו על כל סוכן למטה כדי לפתוח **חדר אישי מבודד** משלכם.\n"
+            "• 🎙️ **מצב קולי חי:** היכנסו לערוץ הקולי **`🎙️・שיחה-קולית-חיה-smai`** ולחצו על הכפתור הירוק **`🎙️ חבר סוכן לחדר קולי`** (או כתבו `!voice`).\n\n"
+            "👇 **בחרו את הסוכן הרצוי:**"
+        ),
+        color=0x2B2D31
+    )
+    for k, v in AGENT_CONFIG.items():
+        embed_lobby.add_field(name=f"{v['emoji']} {v['label']}", value=v['topic'], inline=True)
+    await lobby_ch.send(embed=embed_lobby, view=IsolatedAgentLauncher())
 
     # 2. פאנל ניהול וסוכן פיקוד (גלוי רק לבעלים ולאדמין)
     admin_ch_name = "⚙️・פאנל-ניהול-smai"
@@ -655,6 +716,30 @@ async def cmd_add_credits(ctx: commands.Context, member: discord.Member, amount:
     await ctx.send(f"עודכן: ל-{member.mention} נוספו `{amount}` קרדיטים. יתרה: `{new_bal}`.")
 
 
+@bot.command(name="voice")
+async def cmd_voice(ctx: commands.Context):
+    """מחבר את הבוט לערוץ הקולי שבו המשתמש נמצא."""
+    if not isinstance(ctx.author, discord.Member) or not ctx.author.voice or not ctx.author.voice.channel:
+        await ctx.reply("🎙️ היכנס קודם לערוץ הקולי **`🎙️・שיחה-קולית-חיה-smai`** ואז כתוב `!voice`!", mention_author=False)
+        return
+    v_ch = ctx.author.voice.channel
+    vc = ctx.guild.voice_client if ctx.guild else None
+    if vc and vc.is_connected():
+        await vc.move_to(v_ch)
+    else:
+        await v_ch.connect()
+    await ctx.reply(f"🔊 התחברתי ל-{v_ch.mention}! מעכשיו אקריא לך את התשובות בקול חי!", mention_author=False)
+    await speak_in_voice(ctx.guild, "שלום! אני מחובר לערוץ הקולי ומוכן לדבר איתך.")
+
+
+@bot.command(name="leave")
+async def cmd_leave(ctx: commands.Context):
+    """מנתק את הבוט מהערוץ הקולי."""
+    if ctx.guild and ctx.guild.voice_client:
+        await ctx.guild.voice_client.disconnect()
+        await ctx.reply("🔇 התנתקתי מהערוץ הקולי.", mention_author=False)
+
+
 @bot.command(name="my_credits")
 async def cmd_my_credits(ctx: commands.Context):
     if is_admin_or_owner(ctx.author):
@@ -818,6 +903,11 @@ async def on_message(message: discord.Message):
 
             for i in range(0, len(reply_text), 1900):
                 await message.reply(reply_text[i:i + 1900], mention_author=False)
+
+            # אם המשתמש נמצא בערוץ קולי עם הבוט — הבוט מקריא את התשובה בקול חי!
+            if isinstance(message.author, discord.Member) and message.author.voice and message.guild and message.guild.voice_client:
+                if message.author.voice.channel == message.guild.voice_client.channel:
+                    await speak_in_voice(message.guild, reply_text)
         except Exception as e:
             print(f"Error: {e}")
             await message.reply("הייתה תקלה זמנית בעיבוד הבקשה, נסה שוב בעוד רגע.", mention_author=False)
