@@ -96,6 +96,7 @@ ai_client = genai.Client(api_key=GEMINI_API_KEY)
 chat_histories: dict[str, list[types.Content]] = {}
 MAX_HISTORY = 10
 EMERGENCY_STOP = False
+PAUSED_MODELS: set[str] = set()  # שמות מודלים מושהים: "SMAI V1", "SMAI Versus", "SMAI Sentinel", "SMAI Vision"
 
 BURST_WINDOW = 60
 BURST_LIMIT = 5
@@ -334,6 +335,56 @@ async def auto_build_guild(guild: discord.Guild):
         }
         await guild.create_voice_channel(voice_soon_name, category=main_cat, overwrites=v_overwrites)
 
+    # ערוץ מדריך ורשימת כל הפקודות
+    cmds_name = "📖・כל-הפקודות-והמדריך"
+    cmds_ch = discord.utils.get(guild.text_channels, name=cmds_name)
+    if not cmds_ch:
+        c_overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=True, send_messages=False),
+            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+        }
+        cmds_ch = await guild.create_text_channel(cmds_name, category=main_cat, overwrites=c_overwrites)
+        embed_cmds = discord.Embed(
+            title="📖 מדריך ורשימת הפקודות — SMAI AI Hub",
+            description="כאן תמצאו את כל הפקודות והאפשרויות הזמינות בשרת:",
+            color=0x5865F2
+        )
+        embed_cmds.add_field(
+            name="👤 פקודות למשתמשים",
+            value=(
+                "• **`!my_credits`** — בדיקת יתרת הקרדיטים שלך ודרגת המשתמש (דמו / Booster).\n"
+                "• **פתיחת חדר אישי:** לחצו על הכפתורים בערוץ `🔒・פתיחת-צאט-אישי-מבודד` או פשוט כתבו הודעה והבוט יעביר אתכם אוטומטית לחדר מבודד משלכם!\n"
+                "• **ניתוח תמונות (Vision):** שלחו כל תמונה או צילום מסך בחדר הפרטי שלכם והסוכן ינתח אותה."
+            ),
+            inline=False
+        )
+        embed_cmds.add_field(
+            name="🤖 מודלי ה-AI בשרת",
+            value=(
+                "• **`SMAI V1`** — מודל מהיר לשיחות, לימודים ויצירת פרומפטים (5 הודעות דמו מתחדשות כל 48 שעות).\n"
+                "• **`SMAI Versus`** — מודל על לתכנות ומערכות מורכבות (פתוח ל-Server Boosters / VIP).\n"
+                "• **`SMAI Vision`** — סוכן ראייה ממוחשבת לניתוח תמונות.\n"
+                "• **`SMAI Sentinel`** — סוכן אבטחת מידע לבדיקת קישורים וסקאמים."
+            ),
+            inline=False
+        )
+        embed_cmds.add_field(
+            name="⚙️ פקודות הנהלה (בפאנל הניהול בלבד)",
+            value=(
+                "• **`!stop`** / **`!resume`** — השעיה או הפעלה מיידית של כל הסוכנים בשרת.\n"
+                "• **`!pause_model <v1/versus/sentinel/vision/all>`** — השעיית מודל ספציפי.\n"
+                "• **`!unpause_model <v1/versus/sentinel/vision/all>`** — החזרת מודל מושהה לפעילות.\n"
+                "• **`!models_status`** — בדיקת סטטוס כל המודלים (פעיל / מושהה).\n"
+                "• **`!add_credits @משתמש <כמות>`** — הוספת קרדיטים למשתמש.\n"
+                "• **`!set_credits @משתמש <כמות>`** — קביעת יתרת קרדיטים.\n"
+                "• **`!check_credits @משתמש`** — בדיקת יתרת קרדיטים של משתמש.\n"
+                "• **`!screen`** — קבלת צילום מסך חי בזמן אמת.\n"
+                "• **`!audit @משתמש`** / **`!export_audit @משתמש`** — גישת חירום/משטרה להיסטוריית צ'אטים."
+            ),
+            inline=False
+        )
+        await cmds_ch.send(embed=embed_cmds)
+
     # ערוץ לובי לפתיחת חדרים פרטיים מבודדים (אף אחד לא יכול לכתוב בו ציבורית)
     lobby_name = "🔒・פתיחת-צאט-אישי-מבודד"
     lobby_ch = discord.utils.get(guild.text_channels, name=lobby_name)
@@ -502,7 +553,62 @@ async def cmd_emergency_stop(ctx: commands.Context):
 async def cmd_resume(ctx: commands.Context):
     global EMERGENCY_STOP
     EMERGENCY_STOP = False
-    await ctx.send("✅ **הפעילות חודשה!** כל הסוכנים חזרו לפעול.")
+    PAUSED_MODELS.clear()
+    await ctx.send("✅ **הפעילות חודשה!** כל הסוכנים והמודלים חזרו לפעול.")
+
+
+MODEL_ALIASES = {
+    "v1": "SMAI V1",
+    "smai v1": "SMAI V1",
+    "versus": "SMAI Versus",
+    "smai versus": "SMAI Versus",
+    "sentinel": "SMAI Sentinel",
+    "smai sentinel": "SMAI Sentinel",
+    "vision": "SMAI Vision",
+    "smai vision": "SMAI Vision",
+}
+
+
+@bot.command(name="pause_model")
+@commands.has_permissions(administrator=True)
+async def cmd_pause_model(ctx: commands.Context, *, model_name: str):
+    key = model_name.strip().lower()
+    if key == "all":
+        PAUSED_MODELS.update(SMAI_MODELS.keys())
+        await ctx.send("⏸️ **כל המודלים של SMAI הושהו!**")
+        return
+    target = MODEL_ALIASES.get(key)
+    if not target:
+        await ctx.send("שם מודל לא מוכר. אפשרויות: `v1`, `versus`, `sentinel`, `vision`, `all`.")
+        return
+    PAUSED_MODELS.add(target)
+    await ctx.send(f"⏸️ המודל **{target}** הושהה בהצלחה ולא יצרוך משאבים כעת.")
+
+
+@bot.command(name="unpause_model")
+@commands.has_permissions(administrator=True)
+async def cmd_unpause_model(ctx: commands.Context, *, model_name: str):
+    key = model_name.strip().lower()
+    if key == "all":
+        PAUSED_MODELS.clear()
+        await ctx.send("▶️ **כל המודלים של SMAI חזרו לפעילות מלאה!**")
+        return
+    target = MODEL_ALIASES.get(key)
+    if not target:
+        await ctx.send("שם מודל לא מוכר. אפשרויות: `v1`, `versus`, `sentinel`, `vision`, `all`.")
+        return
+    PAUSED_MODELS.discard(target)
+    await ctx.send(f"▶️ המודל **{target}** חזר לפעילות!")
+
+
+@bot.command(name="models_status")
+@commands.has_permissions(administrator=True)
+async def cmd_models_status(ctx: commands.Context):
+    lines = ["📊 **סטטוס מודלי SMAI:**"]
+    for m in SMAI_MODELS.keys():
+        status = "⏸️ מושהה" if m in PAUSED_MODELS or EMERGENCY_STOP else "🟢 פעיל"
+        lines.append(f"• **{m}**: {status}")
+    await ctx.send("\n".join(lines))
 
 
 @bot.command(name="screen")
@@ -664,6 +770,11 @@ async def on_message(message: discord.Message):
 
     if brand_model == "SMAI Versus" and not is_premium:
         brand_model = "SMAI V1"
+
+    # בדיקה אם המודל הספציפי מושהה (למשתמשים רגילים או בכלל)
+    if brand_model in PAUSED_MODELS:
+        await message.reply(f"⏸️ המודל **{brand_model}** מושהה כעת זמנית ע\"י הנהלת השרת. נסה שוב מאוחר יותר!", mention_author=False)
+        return
 
     real_model = SMAI_MODELS.get(brand_model, "gemini-3.8-flash")
     full_prompt = f"{conf['prompt']}\n\n{SECURITY_AND_BRAND_RULE}"
